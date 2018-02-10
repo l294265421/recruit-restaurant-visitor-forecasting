@@ -1,0 +1,226 @@
+"""
+Contributions from:
+DSEverything - Mean Mix - Math, Geo, Harmonic (LB 0.493)
+https://www.kaggle.com/dongxu027/mean-mix-math-geo-harmonic-lb-0-493
+JdPaletto - Surprised Yet? - Part2 - (LB: 0.503)
+https://www.kaggle.com/jdpaletto/surprised-yet-part2-lb-0-503
+hklee - weighted mean comparisons, LB 0.497, 1ST
+https://www.kaggle.com/zeemeen/weighted-mean-comparisons-lb-0-497-1st
+
+Also all comments for changes, encouragement, and forked scripts rock
+
+Keep the Surprise Going
+"""
+
+import glob, re
+import numpy as np
+import pandas as pd
+from sklearn import *
+from datetime import datetime
+from xgboost import XGBRegressor
+
+data_dir = r'D:\document\program\ml\machine-learning-databases\kaggle\Recruit Restaurant Visitor Forecasting\\'
+data = {
+    'air_visit_data': pd.read_csv(data_dir + 'air_visit_data.csv'),
+    'air_store_info': pd.read_csv(data_dir + 'air_store_info.csv'),
+    'hpg_store_info': pd.read_csv(data_dir + 'hpg_store_info.csv'),
+    'air_reserve': pd.read_csv(data_dir + 'air_reserve.csv'),
+    'hpg_reserve': pd.read_csv(data_dir + 'hpg_reserve.csv'),
+    'store_id_relation': pd.read_csv(data_dir + 'store_id_relation.csv'),
+    'sample_submission': pd.read_csv(data_dir + 'sample_submission.csv'),
+    'date_info': pd.read_csv(data_dir + 'date_info.csv').rename(columns={'calendar_date': 'visit_date'})
+}
+
+data['hpg_reserve'] = pd.merge(data['hpg_reserve'], data['store_id_relation'], how='inner', on=['hpg_store_id'])
+
+for df in ['air_reserve', 'hpg_reserve']:
+    data[df]['visit_datetime'] = pd.to_datetime(data[df]['visit_datetime'])
+    data[df]['visit_datetime'] = data[df]['visit_datetime'].dt.date
+    data[df]['reserve_datetime'] = pd.to_datetime(data[df]['reserve_datetime'])
+    data[df]['reserve_datetime'] = data[df]['reserve_datetime'].dt.date
+    data[df]['reserve_datetime_diff'] = data[df].apply(lambda r: (r['visit_datetime'] - r['reserve_datetime']).days,
+                                                       axis=1)
+    tmp1 = data[df].groupby(['air_store_id', 'visit_datetime'], as_index=False)[
+        ['reserve_datetime_diff', 'reserve_visitors']].sum().rename(
+        columns={'visit_datetime': 'visit_date', 'reserve_datetime_diff': 'rs1', 'reserve_visitors': 'rv1'})
+    tmp2 = data[df].groupby(['air_store_id', 'visit_datetime'], as_index=False)[
+        ['reserve_datetime_diff', 'reserve_visitors']].mean().rename(
+        columns={'visit_datetime': 'visit_date', 'reserve_datetime_diff': 'rs2', 'reserve_visitors': 'rv2'})
+    data[df] = pd.merge(tmp1, tmp2, how='inner', on=['air_store_id', 'visit_date'])
+# air_reserve hpg_reserve: air_store_id, visit_date, rs1, rv1, rs2, rv2
+
+data['air_visit_data']['visit_date'] = pd.to_datetime(data['air_visit_data']['visit_date'])
+data['air_visit_data']['dow'] = data['air_visit_data']['visit_date'].dt.dayofweek
+data['air_visit_data']['year'] = data['air_visit_data']['visit_date'].dt.year
+data['air_visit_data']['month'] = data['air_visit_data']['visit_date'].dt.month
+data['air_visit_data']['visit_date'] = data['air_visit_data']['visit_date'].dt.date
+# air_visit_data: air_store_id, visit_date, dow, year, month, visitors
+
+data['sample_submission']['visit_date'] = data['sample_submission']['id'].map(lambda x: str(x).split('_')[2])
+data['sample_submission']['air_store_id'] = data['sample_submission']['id'].map(lambda x: '_'.join(x.split('_')[:2]))
+data['sample_submission']['visit_date'] = pd.to_datetime(data['sample_submission']['visit_date'])
+data['sample_submission']['dow'] = data['sample_submission']['visit_date'].dt.dayofweek
+data['sample_submission']['year'] = data['sample_submission']['visit_date'].dt.year
+data['sample_submission']['month'] = data['sample_submission']['visit_date'].dt.month
+data['sample_submission']['visit_date'] = data['sample_submission']['visit_date'].dt.date
+# sample_submission: air_store_id, visit_date, dow, year, month, visitors
+
+unique_stores = data['sample_submission']['air_store_id'].unique()
+stores = pd.concat([pd.DataFrame({'air_store_id': unique_stores, 'dow': [i] * len(unique_stores)}) for i in range(7)],
+                   axis=0, ignore_index=True).reset_index(drop=True)
+# stores: air_store_id dow
+# stores记录每个饭店在一周的每一天的情况
+
+# sure it can be compressed...
+tmp = data['air_visit_data'].groupby(['air_store_id', 'dow'], as_index=False)['visitors'].min().rename(
+    columns={'visitors': 'min_visitors'})
+stores = pd.merge(stores, tmp, how='left', on=['air_store_id', 'dow'])
+tmp = data['air_visit_data'].groupby(['air_store_id', 'dow'], as_index=False)['visitors'].mean().rename(
+    columns={'visitors': 'mean_visitors'})
+stores = pd.merge(stores, tmp, how='left', on=['air_store_id', 'dow'])
+tmp = data['air_visit_data'].groupby(['air_store_id', 'dow'], as_index=False)['visitors'].median().rename(
+    columns={'visitors': 'median_visitors'})
+stores = pd.merge(stores, tmp, how='left', on=['air_store_id', 'dow'])
+tmp = data['air_visit_data'].groupby(['air_store_id', 'dow'], as_index=False)['visitors'].max().rename(
+    columns={'visitors': 'max_visitors'})
+stores = pd.merge(stores, tmp, how='left', on=['air_store_id', 'dow'])
+tmp = data['air_visit_data'].groupby(['air_store_id', 'dow'], as_index=False)['visitors'].count().rename(
+    columns={'visitors': 'count_observations'})
+stores = pd.merge(stores, tmp, how='left', on=['air_store_id', 'dow'])
+# stores: air_store_id, dow, min_visitors, mean_visitors, median_visitors, max_visitors, count_observations
+
+stores = pd.merge(stores, data['air_store_info'], how='left', on=['air_store_id'])
+# stores: air_store_id, dow, min_visitors, mean_visitors, median_visitors, max_visitors, count_observations, air_genre_name, air_area_name, latitude, longitude
+
+# NEW FEATURES FROM Georgii Vyshnia
+stores['air_genre_name'] = stores['air_genre_name'].map(lambda x: str(str(x).replace('/', ' ')))
+stores['air_area_name'] = stores['air_area_name'].map(lambda x: str(str(x).replace('-', ' ')))
+lbl = preprocessing.LabelEncoder()
+for i in range(10):
+    stores['air_genre_name' + str(i)] = lbl.fit_transform(
+        stores['air_genre_name'].map(lambda x: str(str(x).split(' ')[i]) if len(str(x).split(' ')) > i else ''))
+    stores['air_area_name' + str(i)] = lbl.fit_transform(
+        stores['air_area_name'].map(lambda x: str(str(x).split(' ')[i]) if len(str(x).split(' ')) > i else ''))
+stores['air_genre_name'] = lbl.fit_transform(stores['air_genre_name'])
+stores['air_area_name'] = lbl.fit_transform(stores['air_area_name'])
+# stores: air_store_id, dow, min_visitors, mean_visitors, median_visitors, max_visitors, count_observations, air_genre_name, air_area_name, latitude, longitude, air_genre_name0-air_genre_name9
+
+data['date_info']['visit_date'] = pd.to_datetime(data['date_info']['visit_date'])
+data['date_info']['day_of_week'] = lbl.fit_transform(data['date_info']['day_of_week'])
+data['date_info']['visit_date'] = data['date_info']['visit_date'].dt.date
+
+train = pd.merge(data['air_visit_data'], data['date_info'], how='left', on=['visit_date'])
+test = pd.merge(data['sample_submission'], data['date_info'], how='left', on=['visit_date'])
+
+train = pd.merge(train, stores, how='left', on=['air_store_id', 'dow'])
+test = pd.merge(test, stores, how='left', on=['air_store_id', 'dow'])
+
+for df in ['air_reserve', 'hpg_reserve']:
+    train = pd.merge(train, data[df], how='left', on=['air_store_id', 'visit_date'])
+    test = pd.merge(test, data[df], how='left', on=['air_store_id', 'visit_date'])
+
+train['id'] = train.apply(lambda r: '_'.join([str(r['air_store_id']), str(r['visit_date'])]), axis=1)
+
+train['total_reserv_sum'] = train['rv1_x'] + train['rv1_y']
+train['total_reserv_mean'] = (train['rv2_x'] + train['rv2_y']) / 2
+train['total_reserv_dt_diff_mean'] = (train['rs2_x'] + train['rs2_y']) / 2
+
+test['total_reserv_sum'] = test['rv1_x'] + test['rv1_y']
+test['total_reserv_mean'] = (test['rv2_x'] + test['rv2_y']) / 2
+test['total_reserv_dt_diff_mean'] = (test['rs2_x'] + test['rs2_y']) / 2
+
+# NEW FEATURES FROM JMBULL
+train['date_int'] = train['visit_date'].apply(lambda x: x.strftime('%Y%m%d')).astype(int)
+test['date_int'] = test['visit_date'].apply(lambda x: x.strftime('%Y%m%d')).astype(int)
+train['var_max_lat'] = train['latitude'].max() - train['latitude']
+train['var_max_long'] = train['longitude'].max() - train['longitude']
+test['var_max_lat'] = test['latitude'].max() - test['latitude']
+test['var_max_long'] = test['longitude'].max() - test['longitude']
+
+# NEW FEATURES FROM Georgii Vyshnia
+train['lon_plus_lat'] = train['longitude'] + train['latitude']
+test['lon_plus_lat'] = test['longitude'] + test['latitude']
+
+lbl = preprocessing.LabelEncoder()
+train['air_store_id2'] = lbl.fit_transform(train['air_store_id'])
+test['air_store_id2'] = lbl.transform(test['air_store_id'])
+
+col = [c for c in train if c not in ['id', 'air_store_id', 'visit_date', 'visitors']]
+train = train.fillna(-1)
+test = test.fillna(-1)
+
+
+def RMSLE(y, pred):
+    return metrics.mean_squared_error(y, pred) ** 0.5
+
+
+model1 = ensemble.GradientBoostingRegressor(learning_rate=0.2, random_state=3, n_estimators=200, subsample=0.8,
+                                            max_depth=10)
+model2 = neighbors.KNeighborsRegressor(n_jobs=-1, n_neighbors=4)
+model3 = XGBRegressor(learning_rate=0.2, random_state=3, n_estimators=200, subsample=0.8,
+                      colsample_bytree=0.8, max_depth=10)
+
+model1.fit(train[col], np.log1p(train['visitors'].values))
+model2.fit(train[col], np.log1p(train['visitors'].values))
+model3.fit(train[col], np.log1p(train['visitors'].values))
+
+preds1 = model1.predict(train[col])
+preds2 = model2.predict(train[col])
+preds3 = model3.predict(train[col])
+
+print('RMSE GradientBoostingRegressor: ', RMSLE(np.log1p(train['visitors'].values), preds1))
+print('RMSE KNeighborsRegressor: ', RMSLE(np.log1p(train['visitors'].values), preds2))
+print('RMSE XGBRegressor: ', RMSLE(np.log1p(train['visitors'].values), preds3))
+preds1 = model1.predict(test[col])
+preds2 = model2.predict(test[col])
+preds3 = model3.predict(test[col])
+
+test['visitors'] = 0.3 * preds1 + 0.3 * preds2 + 0.4 * preds3
+test['visitors'] = np.expm1(test['visitors']).clip(lower=0.)
+sub1 = test[['id', 'visitors']].copy()
+del train;
+del data;
+
+# from hklee
+# https://www.kaggle.com/zeemeen/weighted-mean-comparisons-lb-0-497-1st/code
+dfs = {fn[fn.rfind('\\') + 1 : -4]:
+           pd.read_csv(fn) for fn in glob.glob(data_dir +'*.csv')}
+
+for k, v in dfs.items(): locals()[k] = v
+
+wkend_holidays = date_info.apply(
+    (lambda x: (x.day_of_week == 'Sunday' or x.day_of_week == 'Saturday') and x.holiday_flg == 1), axis=1)
+date_info.loc[wkend_holidays, 'holiday_flg'] = 0
+date_info['weight'] = ((date_info.index + 1) / len(date_info)) ** 5
+
+visit_data = air_visit_data.merge(date_info, left_on='visit_date', right_on='calendar_date', how='left')
+visit_data.drop('calendar_date', axis=1, inplace=True)
+visit_data['visitors'] = visit_data.visitors.map(pd.np.log1p)
+
+wmean = lambda x: ((x.weight * x.visitors).sum() / x.weight.sum())
+visitors = visit_data.groupby(['air_store_id', 'day_of_week', 'holiday_flg']).apply(wmean).reset_index()
+visitors.rename(columns={0: 'visitors'}, inplace=True)  # cumbersome, should be better ways.
+
+sample_submission['air_store_id'] = sample_submission.id.map(lambda x: '_'.join(x.split('_')[:-1]))
+sample_submission['calendar_date'] = sample_submission.id.map(lambda x: x.split('_')[2])
+sample_submission.drop('visitors', axis=1, inplace=True)
+sample_submission = sample_submission.merge(date_info, on='calendar_date', how='left')
+sample_submission = sample_submission.merge(visitors, on=[
+    'air_store_id', 'day_of_week', 'holiday_flg'], how='left')
+
+missings = sample_submission.visitors.isnull()
+sample_submission.loc[missings, 'visitors'] = sample_submission[missings].merge(
+    visitors[visitors.holiday_flg == 0], on=('air_store_id', 'day_of_week'),
+    how='left')['visitors_y'].values
+
+missings = sample_submission.visitors.isnull()
+sample_submission.loc[missings, 'visitors'] = sample_submission[missings].merge(
+    visitors[['air_store_id', 'visitors']].groupby('air_store_id').mean().reset_index(),
+    on='air_store_id', how='left')['visitors_y'].values
+
+sample_submission['visitors'] = sample_submission.visitors.map(pd.np.expm1)
+sub2 = sample_submission[['id', 'visitors']].copy()
+sub_merge = pd.merge(sub1, sub2, on='id', how='inner')
+
+sub_merge['visitors'] = 0.7 * sub_merge['visitors_x'] + 0.3 * sub_merge['visitors_y'] * 1.1
+sub_merge[['id', 'visitors']].to_csv(data_dir + 'submission.csv', index=False)
